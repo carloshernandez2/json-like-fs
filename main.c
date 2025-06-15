@@ -117,6 +117,99 @@ static int json_read(const char *path, char *buf, size_t size, off_t offset,
 
 // The root dorectory case scenario does not run through the functions below
 
+static int json_write(const char *path, const char *buf, size_t size,
+                      off_t offset, struct fuse_file_info *fi) {
+    (void)fi;
+    gchar **path_parts = g_strsplit(path + 1, "/", -1);
+    cJSON *item =
+        cJSON_GetInObjectItemCaseSensitive(options.json_structure, path_parts);
+
+    if (!item) {
+        g_strfreev(path_parts);
+        return -ENOENT;
+    }
+
+    if (!cJSON_IsString(item)) {
+        g_strfreev(path_parts);
+        return -EISDIR; // Cannot write to a directory
+    }
+
+    size_t actual_size = strlen(buf);
+    size_t size_to_write = size < actual_size ? size : actual_size;
+
+    size_t item_length = strlen(cJSON_GetStringValue(item));
+
+    if (offset > item_length) {
+        g_strfreev(path_parts);
+        return -EINVAL; // Offset is beyond the current length of the item
+    }
+
+    // Ensure the item is large enough to hold the new data
+    char *new_string = malloc(offset + size_to_write + 1);
+    if (!new_string) {
+        g_strfreev(path_parts);
+        return -ENOMEM;
+    }
+
+    // Copy existing data up to offset
+    strncpy(new_string, cJSON_GetStringValue(item), offset);
+    // Write new data
+    memcpy(new_string + offset, buf, size_to_write);
+    new_string[offset + size_to_write] = '\0';
+
+    // Update the JSON item
+    cJSON_SetValuestring(item, new_string);
+
+    free(new_string);
+    g_strfreev(path_parts);
+
+    return size_to_write;
+}
+
+static int json_rename(const char *from, const char *to, unsigned int flags) {
+    (void)flags;
+    gchar **from_parts = g_strsplit(from + 1, "/", -1);
+    gchar **to_parts = g_strsplit(to + 1, "/", -1);
+
+    cJSON *from_parent_item = cJSON_GetInObjectItemParentCaseSensitive(
+        options.json_structure, from_parts);
+    cJSON *to_parent_item = cJSON_GetInObjectItemParentCaseSensitive(
+        options.json_structure, to_parts);
+
+    if (!from_parent_item || !to_parent_item) {
+        g_strfreev(from_parts);
+        g_strfreev(to_parts);
+        return -ENOENT;
+    }
+
+    gchar *from_last_part = from_parts[g_strv_length(from_parts) - 1];
+    cJSON *item =
+        cJSON_GetObjectItemCaseSensitive(from_parent_item, from_last_part);
+
+    if (!item) {
+        g_strfreev(from_parts);
+        g_strfreev(to_parts);
+        return -ENOENT;
+    }
+
+    gchar *to_last_part = to_parts[g_strv_length(to_parts) - 1];
+
+    if (cJSON_GetObjectItemCaseSensitive(to_parent_item, to_last_part)) {
+        g_strfreev(from_parts);
+        g_strfreev(to_parts);
+        return -EEXIST;
+    }
+
+    cJSON_AddItemToObject(to_parent_item, to_last_part,
+                          cJSON_Duplicate(item, TRUE));
+    cJSON_DeleteItemFromObjectCaseSensitive(from_parent_item, from_last_part);
+
+    g_strfreev(from_parts);
+    g_strfreev(to_parts);
+
+    return 0;
+}
+
 static int json_unlink(const char *path) {
     gchar **path_parts = g_strsplit(path + 1, "/", -1);
     gchar *last_part = path_parts[g_strv_length(path_parts) - 1];
@@ -221,6 +314,8 @@ static const struct fuse_operations json_oper = {
     .readdir = json_readdir,
     .open = json_open,
     .read = json_read,
+    .write = json_write,
+    .rename = json_rename,
     .unlink = json_unlink,
     .rmdir = json_rmdir,
     .mkdir = json_mkdir,
