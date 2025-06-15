@@ -123,6 +123,11 @@ static int json_unlink(const char *path) {
     cJSON *parent_item = cJSON_GetInObjectItemParentCaseSensitive(
         options.json_structure, path_parts);
 
+    if (!parent_item) {
+        g_strfreev(path_parts);
+        return -ENOENT;
+    }
+
     cJSON *item = cJSON_GetObjectItemCaseSensitive(parent_item, last_part);
 
     if (!item) {
@@ -143,6 +148,11 @@ static int json_rmdir(const char *path) {
     cJSON *parent_item = cJSON_GetInObjectItemParentCaseSensitive(
         options.json_structure, path_parts);
 
+    if (!parent_item) {
+        g_strfreev(path_parts);
+        return -ENOENT;
+    }
+
     cJSON *item = cJSON_GetObjectItemCaseSensitive(parent_item, last_part);
 
     if (!item || !cJSON_IsObject(item)) {
@@ -162,22 +172,47 @@ static int json_rmdir(const char *path) {
     return 0;
 }
 
-static int json_mkdir(const char *path, mode_t mode) {
-    (void)mode;
+static int create(const char *path, cJSON *(*create_function)()) {
     gchar **path_parts = g_strsplit(path + 1, "/", -1);
     gchar *last_part = path_parts[g_strv_length(path_parts) - 1];
     cJSON *parent_item = cJSON_GetInObjectItemParentCaseSensitive(
         options.json_structure, path_parts);
+
+    if (!parent_item) {
+        g_strfreev(path_parts);
+        return -ENOENT;
+    }
 
     if (cJSON_GetObjectItemCaseSensitive(parent_item, last_part)) {
         g_strfreev(path_parts);
         return -EEXIST;
     }
 
-    cJSON_AddItemToObject(parent_item, last_part, cJSON_CreateObject());
+    cJSON_AddItemToObject(parent_item, last_part, create_function());
 
     g_strfreev(path_parts);
 
+    return 0;
+}
+
+static int json_mkdir(const char *path, mode_t mode) {
+    (void)mode;
+    return create(path, cJSON_CreateObject);
+}
+
+static int json_create(const char *path, mode_t mode,
+                       struct fuse_file_info *fi) {
+    (void)mode;
+    return create(path, cJSON_CreateEmptyString);
+}
+
+static int json_utimens(const char *path, const struct timespec tv[2],
+                        struct fuse_file_info *fi) {
+    (void)tv;
+    (void)fi;
+    (void)path;
+
+    // This file-system does not support timestamps
     return 0;
 }
 
@@ -189,6 +224,8 @@ static const struct fuse_operations json_oper = {
     .unlink = json_unlink,
     .rmdir = json_rmdir,
     .mkdir = json_mkdir,
+    .create = json_create,
+    .utimens = json_utimens,
 };
 
 static void show_help(const char *progname) {
