@@ -14,7 +14,7 @@
 #include <string.h>
 
 static struct options {
-    const char *structure;
+    const char *initial_structure;
     cJSON *json_structure;
     int show_help;
 } options;
@@ -22,7 +22,7 @@ static struct options {
 #define OPTION(t, p) {t, offsetof(struct options, p), 1}
 
 static const struct fuse_opt option_spec[] = {
-    OPTION("--structure=%s", structure), OPTION("-h", show_help),
+    OPTION("--structure=%s", initial_structure), OPTION("-h", show_help),
     OPTION("--help", show_help), FUSE_OPT_END};
 
 static int json_getattr(const char *path, struct stat *stbuf,
@@ -48,6 +48,35 @@ static int json_getattr(const char *path, struct stat *stbuf,
     g_strfreev(path_parts);
 
     return res;
+}
+
+static int json_getxattr(const char *path, const char *name, char *value,
+                         size_t size) {
+    if (strcmp(name, "user.structure") != 0)
+        return -ENODATA; // Only user.structure is supported
+
+    gchar **path_parts = g_strsplit(path + 1, "/", -1);
+    cJSON *item =
+        cJSON_GetInObjectItemCaseSensitive(options.json_structure, path_parts);
+
+    if (!item) {
+        g_strfreev(path_parts);
+        return -ENOENT; // Item not found
+    }
+
+    char *json_string = cJSON_PrintUnformatted(item);
+    int len = strlen(json_string);
+
+    if (size == 0)
+        return len + 1; // Return required size including null-terminator
+
+    if (size < len + 1) {
+        return -ERANGE; // Buffer too small
+    }
+
+    strncpy(value, json_string, size);
+
+    return len + 1; // Return size including null-terminator
 }
 
 static int json_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -311,6 +340,7 @@ static int json_utimens(const char *path, const struct timespec tv[2],
 
 static const struct fuse_operations json_oper = {
     .getattr = json_getattr,
+    .getxattr = json_getxattr,
     .readdir = json_readdir,
     .open = json_open,
     .read = json_read,
@@ -338,7 +368,7 @@ int main(int argc, char *argv[]) {
     /* Set defaults -- we have to use strdup so that
        fuse_opt_parse can free the defaults if other
        values are specified */
-    options.structure =
+    options.initial_structure =
         strdup("{\"hella\":\"Hello World!\n\",\"foo\": {\"bar\": \"baz\n\"}}");
 
     /* Parse options */
@@ -346,7 +376,7 @@ int main(int argc, char *argv[]) {
         return 1;
 
     /* Parse JSON structure */
-    options.json_structure = cJSON_Parse(options.structure);
+    options.json_structure = cJSON_Parse(options.initial_structure);
     if (options.json_structure == NULL) {
         fprintf(stderr, "Failed to parse JSON structure: %s\n",
                 cJSON_GetErrorPtr());
